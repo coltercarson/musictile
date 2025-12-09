@@ -20,9 +20,10 @@ import yt_dlp
 import requests
 import uuid
 import os
+import tempfile
+import shutil
 from pathlib import Path
-from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional, Union, Callable
 
 # MoviePy v2 removed the 'moviepy.editor' namespace. Root-level imports are now recommended.
 try:
@@ -132,6 +133,36 @@ def download_audio(url: str, stem: str = "temp_audio") -> Path:
 
     raise FileNotFoundError("Audio download failed; no file produced.")
 
+def extract_embedded_image(audio_path: Path, dest_stem: str = "embedded_cover") -> Optional[Path]:
+    """Extract embedded cover art from an audio file using ffmpeg.
+    
+    Returns the path to the extracted image, or None if extraction fails.
+    """
+    import subprocess
+    
+    # Try common image extensions
+    for ext in (".jpg", ".png"):
+        dest_path = Path(f"{dest_stem}{ext}")
+        try:
+            result = subprocess.run(
+                [
+                    "ffmpeg", "-y", "-i", str(audio_path),
+                    "-an", "-vcodec", "copy", str(dest_path)
+                ],
+                capture_output=True,
+                timeout=30
+            )
+            if dest_path.exists() and dest_path.stat().st_size > 0:
+                print(f"Extracted embedded image to {dest_path}")
+                return dest_path
+        except Exception as e:
+            print(f"Failed to extract embedded image ({ext}): {e}")
+            if dest_path.exists():
+                dest_path.unlink()
+    
+    return None
+
+
 def download_image(url: str, dest_stem: str = "cover") -> Path:
     """Robust image downloader.
 
@@ -189,11 +220,33 @@ def generate_video(
     clip_length: float,
     output_filename: str,
     square_res: int = 1080,
+    audio_file: Optional[Union[str, Path]] = None,
+    image_file: Optional[Union[str, Path]] = None,
+    use_embedded_image: bool = False,
+    progress_callback: Optional[Callable[[str, int], None]] = None,
 ) -> Path:
     """Generate a square video using given parameters.
 
+    Args:
+        audio_url: YouTube URL for audio (ignored if audio_file is provided)
+        image_url: Image URL (ignored if image_file is provided or use_embedded_image is True)
+        start_time: Start time in seconds
+        clip_length: Clip length in seconds
+        output_filename: Output filename
+        square_res: Square resolution (default 1080)
+        audio_file: Optional local audio file path (takes precedence over audio_url)
+        image_file: Optional local image file path (takes precedence over image_url)
+        use_embedded_image: If True, extract and use embedded image from audio file
+        progress_callback: Optional callback function(stage: str, percent: int) for progress updates
+
     Returns path to the created video file.
     """
+    
+    def report_progress(stage: str, percent: int):
+        if progress_callback:
+            progress_callback(stage, percent)
+        print(f"[{percent}%] {stage}")
+    
     start_time = max(0.0, start_time)
     requested_length = max(0.01, clip_length)
     square_res = max(64, square_res)
@@ -203,16 +256,45 @@ def generate_video(
     unique_id = uuid.uuid4().hex
     audio_stem = f"temp_audio_{unique_id}"
     image_stem = f"cover_{unique_id}"
+    
+    # Track which files we created (for cleanup)
+    created_audio = False
+    created_image = False
 
-    print("Downloading audio via yt_dlp...")
-    audio_path = download_audio(audio_url, stem=audio_stem)
-    print(f"Audio saved to {audio_path}")
+    # Handle audio: local file takes precedence over URL
+    if audio_file:
+        audio_path = Path(audio_file)
+        if not audio_path.exists():
+            raise FileNotFoundError(f"Provided audio file not found: {audio_path}")
+        report_progress("Using local audio file", 10)
+    else:
+        report_progress("Downloading audio via yt_dlp...", 5)
+        audio_path = download_audio(audio_url, stem=audio_stem)
+        created_audio = True
+        report_progress("Audio downloaded", 20)
 
-    print("Downloading image...")
-    image_path = download_image(image_url, dest_stem=image_stem)
-    print(f"Image saved to {image_path}")
+    # Handle image: embedded image > local file > URL
+    if use_embedded_image:
+        report_progress("Extracting embedded image from audio file...", 25)
+        extracted_path = extract_embedded_image(audio_path, dest_stem=image_stem)
+        if extracted_path:
+            image_path = extracted_path
+            created_image = True
+            report_progress("Embedded image extracted", 30)
+        else:
+            raise RuntimeError("Could not extract embedded image from audio file. Try providing an image instead.")
+    elif image_file:
+        image_path = Path(image_file)
+        if not image_path.exists():
+            raise FileNotFoundError(f"Provided image file not found: {image_path}")
+        report_progress("Using local image file", 30)
+    else:
+        report_progress("Downloading image...", 25)
+        image_path = download_image(image_url, dest_stem=image_stem)
+        created_image = True
+        report_progress("Image downloaded", 35)
 
-    print("Combining media (building video clip)...")
+    report_progress("Building video clip...", 40)
     if not audio_path.exists():
         raise FileNotFoundError(f"Expected audio file not found: {audio_path}")
     raw_audio_clip = AudioFileClip(str(audio_path))
@@ -252,17 +334,49 @@ def generate_video(
     else:
         image_clip = image_clip.resize(height=square_res).resize(width=square_res)
 
+    # Normalize audio peak to 0dB
+    report_progress("Normalizing audio...", 45)
+    try:
+        max_volume = audio_clip.max_volume()
+        if max_volume > 0:
+            # Calculate gain needed to reach 0dB (max amplitude of 1.0)
+            normalization_factor = 1.0 / max_volume
+            if hasattr(audio_clip, "with_volume_scaled"):
+                audio_clip = audio_clip.with_volume_scaled(normalization_factor)  # v2
+            else:
+                audio_clip = audio_clip.volumex(normalization_factor)  # v1
+            print(f"Audio normalized: applied gain of {20 * __import__('math').log10(normalization_factor):.2f} dB")
+    except Exception as e:
+        print(f"Warning: Audio normalization failed, using original levels: {e}")
+
     if hasattr(image_clip, "with_audio"):
         video = image_clip.with_audio(audio_clip)
     else:
         video = image_clip.set_audio(audio_clip)
 
-    print("Exporting video...")
+    report_progress("Exporting video (this may take a while)...", 50)
     out_dir = Path("output")
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / output_filename
 
-    video.write_videofile(str(out_path), fps=30, codec="libx264", audio_codec="aac")
+    # Create a custom logger to track ffmpeg progress
+    def ffmpeg_logger(msg_type, msg):
+        # MoviePy sends progress info through the logger
+        if progress_callback and "t:" in str(msg):
+            # Try to parse time from ffmpeg output to estimate progress
+            try:
+                import re
+                time_match = re.search(r't:\s*([\d.]+)', str(msg))
+                if time_match:
+                    current_time = float(time_match.group(1))
+                    export_progress = min(95, 50 + int((current_time / effective_length) * 45))
+                    report_progress("Encoding video...", export_progress)
+            except:
+                pass
+
+    video.write_videofile(str(out_path), fps=30, codec="libx264", audio_codec="aac", logger=None)
+    
+    report_progress("Finalizing...", 95)
 
     # Ensure MoviePy releases file handles to ffmpeg so temp files can be removed
     for clip_obj, name in ((video, "video"), (audio_clip, "audio_clip"), (raw_audio_clip, "raw_audio_clip"), (image_clip, "image_clip")):
@@ -273,19 +387,21 @@ def generate_video(
             # Don't fail the whole run just because a close call misbehaves.
             pass
 
-    # Remove temporary audio file so user can delete/move without needing to quit the shell.
+    # Remove temporary files so user can delete/move without needing to quit the shell.
+    # Only delete files that we created (not user-supplied files).
     try:
-        if audio_path.exists():
-            # Only delete files that look like our generated temp stems to avoid
-            # removing user-supplied files.
-            if audio_stem in str(audio_path):
-                audio_path.unlink()
+        if created_audio and audio_path.exists() and audio_stem in str(audio_path):
+            audio_path.unlink()
     except Exception as e:
         print(f"Warning: couldn't remove temp audio file {audio_path}: {e}")
+    
+    try:
+        if created_image and image_path.exists() and image_stem in str(image_path):
+            image_path.unlink()
+    except Exception as e:
+        print(f"Warning: couldn't remove temp image file {image_path}: {e}")
 
-    print(
-        f"✅ Done! Saved segment {start_time:.2f}s → {end_time:.2f}s ({effective_length:.2f}s) as {out_path}"
-    )
+    report_progress("Done!", 100)
     return out_path
 
 
