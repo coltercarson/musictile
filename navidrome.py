@@ -2,6 +2,7 @@
 salt/token, never the password); calls follow tdz/navidrome.py (stdlib urllib)."""
 import http.client
 import json
+import os
 import shutil
 import urllib.error
 import urllib.parse
@@ -29,7 +30,9 @@ def _open(req, what):
             raise AuthExpired("Navidrome session expired, log in again") from exc
         raise NavidromeError(f"Navidrome {what} failed (HTTP {exc.code})") from exc
     except (OSError, http.client.HTTPException) as exc:
-        raise NavidromeError(f"Can't reach Navidrome: {getattr(exc, 'reason', exc)}") from exc
+        raise NavidromeError(f"Can't reach {req.full_url.split('/', 3)[2]} from the server "
+                            f"({getattr(exc, 'reason', exc)}). The URL is fetched by the app's container, "
+                            f"so use {os.environ.get('ND_URL', 'http://navidrome:4533')}, not localhost or the host name") from exc
 
 
 def login(url: str, username: str, password: str) -> dict:
