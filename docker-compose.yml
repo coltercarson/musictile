@@ -1,0 +1,22 @@
+services:
+  video-tile:
+    build: .
+    container_name: video-tile
+    user: "1000:1000"
+    ports:
+      - "5050:5000"
+    volumes:
+      - .:/app   # ponytail: code is mounted, so `docker compose restart` picks up edits
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      HOME: /tmp
+      ND_URL: ${ND_URL:-http://navidrome:4533}
+    networks: [default, navidrome]
+    restart: unless-stopped
+
+networks:
+  navidrome:
+    external: true
+    name: navidrome_default

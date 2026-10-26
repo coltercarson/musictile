@@ -1,4 +1,3 @@
-moviepy
-yt-dlp
-requests
 flask
+yt-dlp[default]
+numpy
