@@ -1,95 +1,50 @@
-# Video Tile
+# musictile
 
-Generate square videos from audio (YouTube or local files) and static images — perfect for sharing music clips on social media.
+Make square music clips from your phone. Pick tracks from Navidrome, YouTube (a video or a whole playlist) or a local file, set each clip's start on a waveform, optionally swap the cover for one from Discogs, and render square MP4s (still cover + peak-normalised audio) to save straight to your phone.
 
-## Features
-
-- 🎵 **YouTube audio download** — Extract audio directly from YouTube URLs
-- 🖼️ **Flexible image sources** — Use a URL, local file, or embedded album art
-- ✂️ **Clip trimming** — Specify start time and duration
-- 🔊 **Audio normalization** — Automatically peaks audio to 0dB
-- 📐 **Square output** — Configurable resolution (default 1080×1080)
-- 🌐 **Web UI** — Simple Flask-based interface with drag-and-drop uploads
-
-## Installation
+## Setup
 
 ```bash
-# Clone the repository
-git clone https://github.com/coltercarson/video-tile.git
-cd video-tile
-
-# Install dependencies
-pip install -r requirements.txt
+git clone https://github.com/coltercarson/musictile.git
+cd musictile
+cp .env.example .env
 ```
 
-### Requirements
+Fill in `.env`:
 
-- Python 3.8+
-- FFmpeg (must be available in PATH)
-
-## Usage
-
-### Web UI
+- `SECRET_KEY`: any long random string (`python3 -c "import secrets; print(secrets.token_hex(32))"`). It signs the login cookie, so keeping it fixed keeps you logged in across restarts.
+- `DISCOGS_TOKEN` (optional): a personal token from <https://www.discogs.com/settings/developers>. Without it the Discogs cover search is off.
+- `ND_URL` (optional): the Navidrome URL prefilled on the login form. Default `http://navidrome:4533`.
 
 ```bash
-python video_ui.py
+docker compose up -d --build
 ```
 
-Open [http://127.0.0.1:5000](http://127.0.0.1:5000) in your browser.
+Open `http://coltersrv:5050` (or `http://<host>:5050`).
 
-### Command Line (Python API)
+The compose file joins the external Docker network `navidrome_default` so the app can reach Navidrome by container name. If you don't run Navidrome in Docker on the same host, remove the `navidrome` network from `docker-compose.yml` and log in with Navidrome's normal URL.
 
-```python
-from sq_vid import generate_video
+The code is bind-mounted into the container: after editing Python, run `docker compose restart video-tile`. Edits to `static/` only need a page reload.
 
-generate_video(
-    audio_url="https://www.youtube.com/watch?v=...",
-    image_url="https://example.com/cover.jpg",
-    start_time=30.0,       # Start at 30 seconds
-    clip_length=60.0,      # 60 second clip
-    output_filename="my_clip.mp4",
-    square_res=1080,       # 1080x1080 output
-)
+## Saving to the phone
+
+**Save** uses Android's share sheet, so clips can go straight into Photos. Chrome only allows that on HTTPS. Over plain HTTP the app falls back to a normal download. To get the share sheet on HTTP, open `chrome://flags/#unsafely-treat-insecure-origin-as-secure` on the phone, add `http://coltersrv:5050`, and relaunch Chrome.
+
+## Security
+
+The app has no login of its own. Anyone who can reach port 5050 can use it, so keep it on your LAN or tailnet. Navidrome passwords are never stored on the server; the browser keeps one only if you tick "Save password".
+
+## Tests
+
+```bash
+docker compose exec video-tile python test_render.py
 ```
 
-#### Local Files
+## Adding a source
 
-```python
-generate_video(
-    audio_url="",          # Ignored when audio_file is provided
-    image_url="",          # Ignored when image_file is provided
-    start_time=0.0,
-    clip_length=30.0,
-    output_filename="local_clip.mp4",
-    audio_file="path/to/song.mp3",
-    image_file="path/to/cover.jpg",
-)
-```
-
-#### Embedded Album Art
-
-```python
-generate_video(
-    audio_url="",
-    image_url="",
-    start_time=0.0,
-    clip_length=30.0,
-    output_filename="clip.mp4",
-    audio_file="path/to/song.mp3",
-    use_embedded_image=True,  # Extract cover art from audio file
-)
-```
-
-## Output
-
-Videos are saved to the `output/` directory as MP4 files (H.264 video, AAC audio).
-
-## Dependencies
-
-- [MoviePy](https://zulko.github.io/moviepy/) — Video editing
-- [yt-dlp](https://github.com/yt-dlp/yt-dlp) — YouTube audio extraction
-- [Flask](https://flask.palletsprojects.com/) — Web UI
-- [Requests](https://requests.readthedocs.io/) — Image downloading
+1. Write a module exposing `fetch(ref, dest_dir) -> (audio_path, cover_path | None)`. If there's no cover, the server falls back to art embedded in the audio.
+2. Add a branch for it in `app.py`'s `_fetch` and accept its name in `POST /api/tracks`, plus any routes its picker needs (listing, search).
+3. Add a button on the Source step and a Select screen in `static/app.js`.
 
 ## License
 
