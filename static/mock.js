@@ -51,7 +51,7 @@
   const audio = new Map(); // key -> object url
   const localAudio = new Map(); // key -> object url of the uploaded file
   const jobs = new Map();
-  let jobN = 0;
+  let jobN = 0, brokenOutputs = false;
 
   const needLogin = () => !cfg.nd_user && fail('Not signed in to Navidrome', { status: 401, login: true });
   const guessDuration = (key) => 150 + (hash(key) % 140);
@@ -139,6 +139,7 @@
     },
 
     addTrack(source, ref) {
+      if (source === 'nd' && !cfg.nd_user) return fail('Navidrome session expired', { status: 401, login: true });
       const key = `${source}:${ref}`, t = known.get(ref);
       return startFetch(key, t ? t.duration : guessDuration(key), ref === 'nd-broken' ? 'Navidrome returned 404 for this song' : undefined);
     },
@@ -192,10 +193,32 @@
         items: j.items.map((it, i) => {
           const status = i < step ? 'done' : i === step ? 'rendering' : 'queued';
           if (status !== 'done') return { key: it.key, status };
-          it.url ||= URL.createObjectURL(new Blob([`mock render of ${it.name}\n`], { type: 'video/mp4' }));
+          it.url ||= brokenOutputs ? `/output/${id}/missing.mp4` : URL.createObjectURL(new Blob([`mock render of ${it.name}\n`], { type: 'video/mp4' }));
           return { key: it.key, status, url: it.url };
         }),
       });
     },
+  };
+
+  // Error-path triggers for testing from the devtools console, e.g.
+  //   mockDebug.expireSession()        next Navidrome call (e.g. Add all) gets 401 {login:true}
+  //   mockDebug.forgetJobs()           job() returns 404 for the running render
+  //   mockDebug.fail('job', 10)        next 10 job() calls fail like a network error (fail(m, n, 503) for a 5xx)
+  //   mockDebug.fail('track', 5)       next 5 track() polls fail
+  //   mockDebug.brokenOutputs()        finished renders point at a 404 url (prefetch fails)
+  const faults = {};
+  for (const [name, fn] of Object.entries(window.mockApi)) {
+    if (name === 'audioUrl' || name === 'coverUrl') continue; // sync url builders
+    window.mockApi[name] = (...args) => {
+      const f = faults[name];
+      if (f && f.n > 0) { f.n--; return fail(f.status ? `Server error ${f.status}` : 'Failed to fetch', f.status ? { status: f.status } : {}); }
+      return fn(...args);
+    };
+  }
+  window.mockDebug = {
+    expireSession() { cfg.nd_user = null; lsSet(null); },
+    forgetJobs() { jobs.clear(); },
+    fail(method, n = 1, status = 0) { faults[method] = { n, status }; },
+    brokenOutputs(on = true) { brokenOutputs = on; },
   };
 })();

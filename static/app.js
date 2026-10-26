@@ -63,7 +63,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 function h(tag, props, ...kids) {
   const el = document.createElement(tag);
   for (const [k, v] of Object.entries(props || {})) {
-    if (v == null || v === false) continue;
+    if (v == null || (v === false && !(k in el))) continue;
     if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
     else if (k === 'class') el.className = v;
     else if (k in el && !k.includes('-')) el[k] = v;
@@ -147,21 +147,34 @@ function changed(item) {
 function newItem(source, t) {
   return { key: null, source, ref: t.ref, title: t.title, artist: t.artist || '', album: t.album || '', status: 'adding', duration: t.duration || 0, start: 0, cover: 'default' };
 }
+// Navidrome said the session is gone: show the login form once, however many calls hit it
+function loginLost() {
+  if (!ui.config || ui.config.nd_user == null) return;
+  ui.config.nd_user = null; ui.slots.clear(); ui.searchRes = null;
+  toast('Navidrome session expired. Sign in again.');
+  if (state.step === 'pick') render();
+}
+// run one add/upload call for an optimistic queue item; returns false on a login error
+async function settle(item, call) {
+  try { item.key = (await call()).key; item.status = 'fetching'; }
+  catch (e) {
+    if (e.login) { removeItem(item); loginLost(); return false; }
+    item.status = 'failed'; item.error = e.message;
+  }
+  if (state.queue.includes(item)) changed(item);
+  return true;
+}
 async function enqueue(source, t) {
   if (findQ(source, t.ref)) return;
   const item = newItem(source, t);
   state.queue.push(item); changed();
-  try { item.key = (await api.addTrack(source, t.ref)).key; item.status = 'fetching'; }
-  catch (e) { item.status = 'failed'; item.error = e.message; }
-  if (state.queue.includes(item)) changed(item);
+  await settle(item, () => api.addTrack(source, t.ref));
 }
 async function uploadFiles(files) {
   for (const [i, file] of [...files].entries()) {
     const item = newItem('local', { ref: `${file.name}#${Date.now()}${i}`, title: file.name.replace(/\.[^.]+$/, '') });
     state.queue.push(item); changed();
-    try { item.key = (await api.uploadTrack(file)).key; item.status = 'fetching'; }
-    catch (e) { item.status = 'failed'; item.error = e.message; }
-    if (state.queue.includes(item)) changed(item);
+    if (!(await settle(item, () => api.uploadTrack(file)))) return;
   }
 }
 function removeItem(item) {
@@ -175,11 +188,12 @@ function removeItem(item) {
 function toggleTrack(source, t) { const q = findQ(source, t.ref); q ? removeItem(q) : enqueue(source, t); }
 
 // poll fetching tracks every 1.5 s
-const inflight = new Set();
+const inflight = new Set(), trackErrors = new Map(); // key -> consecutive failed polls
 function checkTrack(item) {
   if (!item.key || inflight.has(item.key)) return;
   inflight.add(item.key);
   api.track(item.key).then((s) => {
+    trackErrors.delete(item.key);
     const before = item.status + item.duration;
     if (s.status === 'ready') { item.status = 'ready'; if (s.duration) item.duration = s.duration; delete item.error; }
     else if (s.status === 'failed') { item.status = 'failed'; item.error = s.error || 'Fetching failed'; }
@@ -187,7 +201,11 @@ function checkTrack(item) {
     else item.status = 'fetching';
     if (item.status === 'ready') loadPeaks(item);
     if (before !== item.status + item.duration && state.queue.includes(item)) changed(item);
-  }).catch(() => {}).finally(() => inflight.delete(item.key));
+  }).catch((e) => {
+    const n = (trackErrors.get(item.key) || 0) + 1;
+    trackErrors.set(item.key, n);
+    if (n >= 5 && state.queue.includes(item)) { trackErrors.delete(item.key); item.status = 'failed'; item.error = e.message; changed(item); }
+  }).finally(() => inflight.delete(item.key));
 }
 setInterval(() => state.queue.forEach((t) => t.status === 'fetching' && checkTrack(t)), 1500);
 
@@ -348,7 +366,10 @@ function pickYt() {
     try {
       const r = await api.ytLookup(url);
       ui.yt = { data: r };
-      if (r.tracks.length === 1) { enqueue('yt', r.tracks[0]); toast('Added to clips'); }
+      if (r.tracks.length === 1) {
+        const had = !!findQ('yt', r.tracks[0].ref);
+        enqueue('yt', r.tracks[0]); toast(had ? 'Already in clips' : 'Added to clips');
+      }
     } catch (err) { ui.yt = { error: err.message }; }
     if (state.step === 'pick' && state.source === 'yt') render();
   };
@@ -675,7 +696,10 @@ function exportScreen() {
     h('div', { class: 'actions' },
       h('button', { class: 'btn primary block big', disabled: running || !!busy.length || !ready.length, onclick: startRender },
         running ? h('span', { class: 'spin' }) : null, renderLabel),
-      job && !running && done.length > 1 ? h('button', { class: 'btn block big', onclick: () => saveFiles(done) }, icon('save'), `Save all ${done.length}`) : null,
+      job && !running && done.length > 1 ? (() => {
+        const ready = done.every((j) => j.fetched);
+        return h('button', { class: 'btn block big', disabled: !ready, onclick: () => saveFiles(done) }, ready ? icon('save') : h('span', { class: 'spin' }), `Save all ${done.length}`);
+      })() : null,
       busy.length ? h('p', { class: 'muted small', style: 'margin:0' }, 'Render unlocks when every track has finished fetching.') : null,
       done.length && !canShare ? h('p', { class: 'note', style: 'margin:0' }, 'Sharing to apps needs HTTPS, so Save downloads the files instead.') : null),
   ];
@@ -708,6 +732,7 @@ function pollJob(job) {
   if (ui.job !== job) return;
   api.job(job.id).then((r) => {
     if (ui.job !== job) return;
+    job.errors = 0;
     let moved = false;
     r.items.forEach((ri) => {
       const j = job.items.find((x) => x.key === ri.key); if (!j) return;
@@ -719,12 +744,24 @@ function pollJob(job) {
     if (moved && state.step === 'export') render();
     if (left) setTimeout(() => pollJob(job), 1000);
     else toast(`Rendered ${plural(job.items.filter((j) => j.status === 'done').length, 'clip')}`);
-  }).catch((e) => { toast(e.message); setTimeout(() => pollJob(job), 3000); });
+  }).catch((e) => {
+    if (ui.job !== job) return;
+    // 4xx: the server forgot the job. Network/5xx: retry up to 10 times, then give up.
+    if (e.status >= 400 && e.status < 500) return loseJob(job, 'Render job lost, render again');
+    job.errors = (job.errors || 0) + 1;
+    if (job.errors >= 10) return loseJob(job, 'Lost contact with the server, render again');
+    setTimeout(() => pollJob(job), 3000);
+  });
+}
+function loseJob(job, msg) {
+  job.items.forEach((j) => { if (j.status === 'queued' || j.status === 'rendering') Object.assign(j, { status: 'failed', error: msg }); });
+  toast(msg);
+  if (state.step === 'export') render();
 }
 // fetch the finished file now, so Save can call navigator.share() straight from the tap
 function prefetch(j) {
   j.prefetching = true;
-  fetch(j.url).then((r) => r.blob()).then((b) => { j.file = new File([b], `${j.name}.mp4`, { type: 'video/mp4' }); }, () => {})
+  fetch(j.url).then((r) => { if (!r.ok) throw new Error(`${r.status}`); return r.blob(); }).then((b) => { j.file = new File([b], `${j.name}.mp4`, { type: 'video/mp4' }); }, () => {})
     .then(() => { j.fetched = true; if (state.step === 'export') render(); });
 }
 async function saveFiles(items) {
