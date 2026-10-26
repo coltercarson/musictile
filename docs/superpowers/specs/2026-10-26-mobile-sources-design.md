@@ -145,7 +145,7 @@ can be revisited; the queue persists across them.
      tap-to-add, "Select all" and "Deselect all". Search → song results with tap-to-add.
    - YouTube: URL field. A video URL adds that video. A playlist URL (or a
      watch URL with `list=`) shows the playlist's videos in the same list UI
-     as a Navidrome playlist: tap-to-add and "Add all".
+     as a Navidrome playlist: tap-to-add, "Select all" and "Deselect all".
    - Local file: audio file input + Add.
    Added tracks show a tick; the step bar count updates.
 3. **Clips**: shared length (default 30s) and resolution (default 1080) at the
