@@ -45,6 +45,7 @@ const rawApi = window.mockApi || realApi;
 const LOGIN_KEY = 'vt-nd-login';
 function savedLogin() { try { return JSON.parse(localStorage.getItem(LOGIN_KEY)) || {}; } catch { return {}; } }
 function saveLogin(v) { try { localStorage.setItem(LOGIN_KEY, JSON.stringify(v)); } catch {} }
+function forgetPassword() { const { url, user } = savedLogin(); saveLogin({ url, user }); }
 
 // Every api call goes through here. On a Navidrome 401 (.login) with a saved password: sign in again
 // silently, once, and retry the call once. Calls that fail together share one re-login.
@@ -53,9 +54,12 @@ async function relogin(orig) {
   const s = savedLogin();
   if (!s.pass) throw orig;
   try {
+    const wasOut = ui.config && !ui.config.nd_user;
     const r = await rawApi.ndLogin(s.url, s.user, s.pass);
     if (ui.config) Object.assign(ui.config, { nd_user: r.user, nd_url: s.url });
+    if (wasOut && state.step === 'select') { ui.loginError = null; ui.slots.clear(); render(); } // login form was up
   } catch (e) {
+    if (e.status === 401) forgetPassword(); // wrong credentials: don't retry them on every 401 or page load
     throw Object.assign(new Error(`Couldn’t sign in again: ${e.message}`), { status: e.status, login: true });
   } finally { loginGen++; }
 }
@@ -136,12 +140,14 @@ const fileName = (t) => (`${t.artist ? t.artist + ' - ' : ''}${t.title}`.replace
 /* ---------------- navigation ---------------- */
 function go(step, extra) {
   if (step !== 'clips') audio.pause();
+  ui.loginError = null;
   state.step = step; persist();
   history.pushState({ step, ...extra }, '');
   render(); scrollTo(0, 0);
 }
 addEventListener('popstate', (e) => {
   const s = e.state || {};
+  ui.loginError = null;
   if (s.step && STEPS.includes(s.step)) { if (s.step !== 'clips') audio.pause(); state.step = s.step; persist(); }
   ui.openPl = s.pl || null;
   render();
@@ -342,7 +348,7 @@ function loginForm() {
     onsubmit: async (e) => {
       e.preventDefault();
       const d = new FormData(f);
-      btn.disabled = true; btn.textContent = 'Signing in…'; err.hidden = true;
+      btn.disabled = true; btn.textContent = 'Signing in…'; err.hidden = true; ui.loginError = null;
       try {
         const r = await api.ndLogin(d.get('url'), d.get('username'), d.get('password'));
         saveLogin({ url: d.get('url'), user: d.get('username'), pass: d.get('save') ? d.get('password') : undefined });
@@ -358,7 +364,7 @@ function loginForm() {
   return [h('h1', {}, 'Sign in to Navidrome'), f];
 }
 function logout() {
-  const { url, user } = savedLogin(); saveLogin({ url, user }); // forget the password, keep the rest
+  forgetPassword(); // keep URL and username
   api.ndLogout().catch(() => {}).then(() => { ui.config.nd_user = null; ui.slots.clear(); ui.openPl = null; ui.searchRes = null; render(); });
 }
 let searchTimer, searchSeq = 0;
@@ -543,9 +549,12 @@ function updateCard(item) {
   old.replaceWith(cardEl(item)); paintItem(item); syncPlayButtons();
 }
 // clip start and playhead both move to t; a running preview follows the new window
-function setStart(item, t) {
+// live (mid-drag): move start + drawn playhead only; otherwise also persist and seek the audio
+function setStart(item, t, live) {
   const d = durOf(item); if (!d) return;
-  item.start = Math.round(Math.max(0, Math.min(t, d - 1)) * 10) / 10; persist();
+  item.start = Math.round(Math.max(0, Math.min(t, d - 1)) * 10) / 10;
+  if (live) { ui.pos[item.key] = item.start; paintItem(item); return; }
+  persist();
   if (cur === item.key && previewEnd != null) previewEnd = item.start + state.length;
   seek(item, item.start);
 }
@@ -558,19 +567,31 @@ function seek(item, t) {
   if (cur === item.key && audio.readyState >= 1) { audio.currentTime = t; if (previewEnd != null && t < item.start) previewEnd = null; }
   paintItem(item);
 }
-// tap or horizontal drag sets the clip start; vertical swipes still scroll the page (touch-action: pan-y),
-// so nothing moves on pointerdown alone
+// Tap or horizontal drag sets the clip start. Vertical swipes scroll the page (touch-action: pan-y):
+// a drag only starts when mostly sideways, a cancelled gesture (browser took over to scroll) puts the
+// start back, and a tap within 300 ms of a scroll (stopping a fling) is ignored.
+let lastScroll = 0;
+document.addEventListener('scroll', () => { lastScroll = performance.now(); }, { capture: true, passive: true });
 function waveInput(wave, item) {
   let down = null;
   const at = (e) => { const r = wave.getBoundingClientRect(); return ((e.clientX - r.left) / r.width) * durOf(item); };
-  wave.addEventListener('pointerdown', (e) => { down = { x: e.clientX, drag: false }; wave.setPointerCapture(e.pointerId); });
+  const restore = (d) => { item.start = d.start; ui.pos[item.key] = d.pos; paintItem(item); };
+  wave.addEventListener('pointerdown', (e) => {
+    down = { x: e.clientX, y: e.clientY, drag: false, start: item.start, pos: ui.pos[item.key] };
+    wave.setPointerCapture(e.pointerId);
+  });
   wave.addEventListener('pointermove', (e) => {
     if (!down) return;
-    if (!down.drag && Math.abs(e.clientX - down.x) > 6) down.drag = true;
-    if (down.drag) setStart(item, at(e));
+    const dx = Math.abs(e.clientX - down.x), dy = Math.abs(e.clientY - down.y);
+    if (!down.drag && dx > 6 && dx > dy) down.drag = true;
+    if (down.drag) setStart(item, at(e), true);
   });
-  wave.addEventListener('pointerup', (e) => { if (down) setStart(item, at(e)); down = null; });
-  wave.addEventListener('pointercancel', () => { down = null; });
+  wave.addEventListener('pointerup', (e) => {
+    const d = down; down = null; if (!d) return;
+    const tap = Math.abs(e.clientY - d.y) <= 10 && performance.now() - lastScroll > 300;
+    if (d.drag || tap) setStart(item, at(e)); else restore(d);
+  });
+  wave.addEventListener('pointercancel', () => { if (down) restore(down); down = null; });
 }
 
 let colors = null;
@@ -818,7 +839,7 @@ function loadConfig() {
   loadConfig.p = api.config().then(async (c) => {
     ui.config = c;
     const s = savedLogin(); // not signed in but the password was saved: sign in silently
-    if (!c.nd_user && s.pass) await api.ndLogin(s.url, s.user, s.pass).then((r) => Object.assign(c, { nd_user: r.user, nd_url: s.url }), (e) => { ui.loginError = e.message; });
+    if (!c.nd_user && s.pass) await api.ndLogin(s.url, s.user, s.pass).then((r) => Object.assign(c, { nd_user: r.user, nd_url: s.url }), (e) => { ui.loginError = e.message; if (e.status === 401) forgetPassword(); });
   }, (e) => {
     ui.config = { nd_url: '', nd_user: null, discogs: false }; toast('Server unreachable: ' + e.message);
   }).then(() => { if (state.step === 'select') render(); });
