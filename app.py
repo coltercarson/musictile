@@ -3,7 +3,6 @@ import json
 import os
 import re
 import shutil
-import threading
 import time
 import urllib.error
 import urllib.request
@@ -12,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from flask import Flask, abort, jsonify, request, send_file, send_from_directory, session
-from werkzeug.utils import secure_filename
+from werkzeug.exceptions import HTTPException
 
 import discogs
 import navidrome
@@ -25,6 +24,7 @@ CACHE, OUTPUT = DATA / "cache", DATA / "output"
 MAX_AGE = 24 * 3600
 ND_URL = os.environ.get("ND_URL", "http://navidrome:4533")
 AUDIO_EXT = {".mp3", ".m4a", ".aac", ".ogg", ".opus", ".flac", ".wav", ".webm", ".aif", ".aiff", ".wma", ".alac"}
+IMAGE_EXT = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 BROWSER_AUDIO = {".mp3", ".m4a", ".aac", ".ogg", ".opus", ".flac", ".wav", ".webm"}
 
 app = Flask(__name__, static_folder="static", static_url_path="")
@@ -60,7 +60,9 @@ def _meta(d: Path) -> dict:
 
 
 def _set_meta(d: Path, **kw):
-    (d / "track.json").write_text(json.dumps({**_meta(d), **kw}))
+    tmp = d / "track.json.tmp"
+    tmp.write_text(json.dumps({**_meta(d), **kw}))
+    os.replace(tmp, d / "track.json")
 
 
 def _sweep():
@@ -107,6 +109,17 @@ def _upstream(exc):
 @app.errorhandler(ValueError)
 def _bad(exc):
     return jsonify(error=str(exc)), 400
+
+
+@app.errorhandler(HTTPException)
+def _http(exc):
+    return jsonify(error=exc.description), exc.code
+
+
+@app.errorhandler(Exception)
+def _crash(exc):
+    app.logger.exception(exc)
+    return jsonify(error="Server error"), 500
 
 
 # ---------- pages + config ----------
@@ -198,7 +211,7 @@ def add_track():
     d.mkdir(parents=True)
     if request.files.get("file"):
         f = request.files["file"]
-        ext = Path(secure_filename(f.filename or "")).suffix.lower()
+        ext = Path(f.filename or "").suffix.lower()
         if ext not in AUDIO_EXT:
             shutil.rmtree(d)
             raise ValueError(f"Unsupported audio type: {ext or 'unknown'}")
@@ -257,7 +270,9 @@ def set_cover(key):
         old.unlink()
     if request.files.get("file"):
         f = request.files["file"]
-        ext = Path(secure_filename(f.filename or "")).suffix.lower() or ".jpg"
+        ext = Path(f.filename or "").suffix.lower()
+        if ext not in IMAGE_EXT:
+            raise ValueError("Cover must be a JPG, PNG, WebP or GIF image")
         f.save(d / f"custom{ext}")
         return {}
     url = (request.get_json(force=True).get("url") or "").strip()
@@ -324,7 +339,7 @@ def start_render():
 def render_status(job):
     if job not in JOBS:
         abort(404)
-    return {"items": [{k: v for k, v in it.items() if k in ("key", "status", "error", "url")}
+    return {"items": [{k: v for k, v in dict(it).items() if k in ("key", "status", "error", "url")}
                       for it in JOBS[job]["items"]]}
 
 
