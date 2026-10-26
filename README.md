@@ -39,8 +39,11 @@ The app has no login of its own. Anyone who can reach port 5050 can use it, so k
 ## Tests
 
 ```bash
-docker compose exec video-tile python test_render.py
+docker compose exec video-tile python test_render.py   # render + waveform
+python3 e2e.py                                         # whole flow in a headless Pixel-sized Chrome (Playwright)
 ```
+
+`e2e.py` runs on the host against the running app and uses the Local file source, so it needs no Navidrome login.
 
 ## Adding a source
 

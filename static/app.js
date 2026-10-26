@@ -750,12 +750,12 @@ function exportScreen() {
     h('div', { class: 'actions' },
       h('button', { class: 'btn primary block big', disabled: running || !!busy.length || !ready.length, onclick: startRender },
         running ? h('span', { class: 'spin' }) : null, renderLabel),
-      job && !running && done.length > 1 ? (() => {
+      job && !running && done.length > 1 && canShare ? (() => { // Android drops all but one download per tap, so Save all needs the share sheet
         const ready = done.every((j) => j.fetched);
         return h('button', { class: 'btn block big', disabled: !ready, onclick: () => saveFiles(done) }, ready ? icon('save') : h('span', { class: 'spin' }), `Save all ${done.length}`);
       })() : null,
       busy.length ? h('p', { class: 'muted small', style: 'margin:0' }, 'Render unlocks when every track has finished fetching.') : null,
-      done.length && !canShare ? h('p', { class: 'note', style: 'margin:0' }, 'Sharing to apps needs HTTPS, so Save downloads the files instead.') : null),
+      done.length && !canShare ? h('p', { class: 'note', style: 'margin:0' }, 'Save all and saving to Photos need HTTPS. Over plain HTTP, Save downloads one clip per tap.') : null),
   ];
   if (!q.length) { out.push(h('div', { class: 'empty' }, 'Nothing to export yet.')); return out; }
   out.push(h('div', { class: 'list' }, q.map((t) => {
@@ -824,10 +824,8 @@ async function saveFiles(items) {
     try { await navigator.share({ files }); } catch (e) { if (e.name !== 'AbortError') toast(e.message); }
     return;
   }
-  items.forEach((j, i) => setTimeout(() => {
-    const a = h('a', { href: j.url, download: `${j.name}.mp4` });
-    document.body.append(a); a.click(); a.remove();
-  }, i * 400));
+  const [j] = items, a = h('a', { href: j.url, download: `${j.name}.mp4` }); // only one item without share, see Save all
+  document.body.append(a); a.click(); a.remove();
 }
 
 /* ---------------- start ---------------- */
