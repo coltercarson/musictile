@@ -266,13 +266,12 @@ def set_cover(key):
     d = _tdir(key)
     if not d.exists():
         abort(404)
-    for old in d.glob("custom.*"):
-        old.unlink()
     if request.files.get("file"):
         f = request.files["file"]
         ext = Path(f.filename or "").suffix.lower()
         if ext not in IMAGE_EXT:
             raise ValueError("Cover must be a JPG, PNG, WebP or GIF image")
+        _clear_custom(d)
         f.save(d / f"custom{ext}")
         return {}
     url = (request.get_json(force=True).get("url") or "").strip()
@@ -284,8 +283,15 @@ def set_cover(key):
         if not ctype.startswith("image/"):
             raise ValueError("That URL isn't an image")
         ext = navidrome.IMAGE_EXT.get(ctype, ".jpg")
-        (d / f"custom{ext}").write_bytes(resp.read(25 * 1024 * 1024))
+        data = resp.read(25 * 1024 * 1024)
+    _clear_custom(d)
+    (d / f"custom{ext}").write_bytes(data)
     return {}
+
+
+def _clear_custom(d: Path):  # only once the new cover is known good, so a bad one keeps the old
+    for old in d.glob("custom.*"):
+        old.unlink()
 
 
 # ---------- render ----------
