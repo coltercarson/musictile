@@ -26,6 +26,8 @@ The compose file joins the external Docker network `navidrome_default` so the ap
 
 The code is bind-mounted into the container: after editing Python, run `docker compose restart video-tile`. Edits to `static/` only need a page reload.
 
+yt-dlp is baked into the image, so when YouTube stops working, update it with `docker compose build --no-cache && docker compose up -d`.
+
 ## Saving to the phone
 
 **Save** uses Android's share sheet, so clips can go straight into Photos. Chrome only allows that on HTTPS. Over plain HTTP the app falls back to a normal download. To get the share sheet on HTTP, open `chrome://flags/#unsafely-treat-insecure-origin-as-secure` on the phone, add `http://coltersrv:5050`, and relaunch Chrome.

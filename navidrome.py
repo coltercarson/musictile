@@ -9,7 +9,7 @@ import urllib.request
 from pathlib import Path
 
 CLIENT, VERSION = "video-tile", "1.16.1"
-IMAGE_EXT = {"image/png": ".png", "image/webp": ".webp", "image/gif": ".gif"}
+IMAGE_EXT = {"image/png": ".png", "image/webp": ".webp"}
 
 
 class NavidromeError(RuntimeError):
@@ -46,7 +46,7 @@ def login(url: str, username: str, password: str) -> dict:
         return {"url": url, "user": data["username"], "jwt": data["token"],
                 "salt": data["subsonicSalt"], "token": data["subsonicToken"]}
     except AuthExpired:
-        raise NavidromeError("Wrong username or password") from None
+        raise AuthExpired("Wrong username or password") from None  # 401 lets the page forget a stale saved password
     except (ValueError, KeyError, TypeError) as exc:
         raise NavidromeError("That doesn't look like a Navidrome server") from exc
 

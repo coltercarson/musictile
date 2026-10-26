@@ -24,7 +24,7 @@ CACHE, OUTPUT = DATA / "cache", DATA / "output"
 MAX_AGE = 24 * 3600
 ND_URL = os.environ.get("ND_URL", "http://navidrome:4533")
 AUDIO_EXT = {".mp3", ".m4a", ".aac", ".ogg", ".opus", ".flac", ".wav", ".webm", ".aif", ".aiff", ".wma", ".alac"}
-IMAGE_EXT = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+IMAGE_EXT = {".jpg", ".jpeg", ".png", ".webp"}  # no GIF: ffmpeg can't -loop 1 a GIF input
 BROWSER_AUDIO = {".mp3", ".m4a", ".aac", ".ogg", ".opus", ".flac", ".wav", ".webm"}
 
 app = Flask(__name__, static_folder="static", static_url_path="")
@@ -69,8 +69,11 @@ def _sweep():
     cutoff = time.time() - MAX_AGE
     for root in (CACHE, OUTPUT):
         for d in root.glob("*"):
-            if d.stat().st_mtime < cutoff:
-                shutil.rmtree(d, ignore_errors=True)
+            try:
+                if d.stat().st_mtime < cutoff:
+                    shutil.rmtree(d, ignore_errors=True)
+            except FileNotFoundError:
+                pass  # a concurrent request's sweep got there first ("Select all" adds in parallel)
 
 
 def _safe_name(name: str) -> str:
@@ -82,13 +85,6 @@ def _nd() -> dict:
     if not nd:
         raise navidrome.AuthExpired("Log in to Navidrome first")
     return nd
-
-
-@app.after_request
-def _keep_session(resp):
-    if "nd" in session:
-        session.modified = True  # navidrome._native refreshes the JWT inside the dict
-    return resp
 
 
 @app.errorhandler(navidrome.AuthExpired)
@@ -270,7 +266,7 @@ def set_cover(key):
         f = request.files["file"]
         ext = Path(f.filename or "").suffix.lower()
         if ext not in IMAGE_EXT:
-            raise ValueError("Cover must be a JPG, PNG, WebP or GIF image")
+            raise ValueError("Cover must be a JPG, PNG or WebP image")
         _clear_custom(d)
         f.save(d / f"custom{ext}")
         return {}
@@ -280,8 +276,8 @@ def set_cover(key):
     req = urllib.request.Request(url, headers={"User-Agent": discogs.USER_AGENT})
     with urllib.request.urlopen(req, timeout=30) as resp:
         ctype = resp.headers.get_content_type()
-        if not ctype.startswith("image/"):
-            raise ValueError("That URL isn't an image")
+        if ctype not in ("image/jpeg", "image/png", "image/webp"):
+            raise ValueError("That URL isn't a JPG, PNG or WebP image")
         ext = navidrome.IMAGE_EXT.get(ctype, ".jpg")
         data = resp.read(25 * 1024 * 1024)
     _clear_custom(d)

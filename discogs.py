@@ -65,5 +65,5 @@ def search(q: str) -> list[dict]:
 
 def images(resource_url: str) -> list[str]:
     if not RELEASE_URL.fullmatch(resource_url):  # client-supplied: only ever call Discogs release URLs
-        raise DiscogsError("Not a Discogs release URL")
+        raise ValueError("Not a Discogs release URL")
     return [i["uri"] for i in _get(resource_url, {}).get("images") or [] if i.get("uri")]
