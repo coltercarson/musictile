@@ -1,5 +1,6 @@
 """Navidrome client. Login follows feishin (/auth/login, keep the JWT + subsonic
 salt/token, never the password); calls follow tdz/navidrome.py (stdlib urllib)."""
+import http.client
 import json
 import shutil
 import urllib.error
@@ -23,15 +24,18 @@ def _open(req, what):
     try:
         return urllib.request.urlopen(req, timeout=60)
     except urllib.error.HTTPError as exc:
+        exc.close()
         if exc.code == 401:
             raise AuthExpired("Navidrome session expired, log in again") from exc
         raise NavidromeError(f"Navidrome {what} failed (HTTP {exc.code})") from exc
-    except (urllib.error.URLError, TimeoutError) as exc:
+    except (OSError, http.client.HTTPException) as exc:
         raise NavidromeError(f"Can't reach Navidrome: {getattr(exc, 'reason', exc)}") from exc
 
 
 def login(url: str, username: str, password: str) -> dict:
     url = url.strip().rstrip("/")
+    if not url.startswith(("http://", "https://")):
+        raise NavidromeError("Server URL must start with http:// or https://")
     req = urllib.request.Request(
         f"{url}/auth/login", method="POST",
         data=json.dumps({"username": username, "password": password}).encode(),
@@ -39,10 +43,12 @@ def login(url: str, username: str, password: str) -> dict:
     try:
         with _open(req, "login") as resp:
             data = json.load(resp)
+        return {"url": url, "user": data["username"], "jwt": data["token"],
+                "salt": data["subsonicSalt"], "token": data["subsonicToken"]}
     except AuthExpired:
         raise NavidromeError("Wrong username or password") from None
-    return {"url": url, "user": data["username"], "jwt": data["token"],
-            "salt": data["subsonicSalt"], "token": data["subsonicToken"]}
+    except (ValueError, KeyError, TypeError) as exc:
+        raise NavidromeError("That doesn't look like a Navidrome server") from exc
 
 
 def _native(nd: dict, path: str):
@@ -97,8 +103,18 @@ def _save(url: str, path_for) -> Path:
         if ctype in ("application/json", "text/xml", "application/xml"):
             raise NavidromeError("Navidrome refused the download")
         path = path_for(ctype)
-        with open(path, "wb") as fh:
-            shutil.copyfileobj(resp, fh)
+        part = path.with_name(path.name + ".part")
+        try:
+            with open(part, "wb") as fh:
+                shutil.copyfileobj(resp, fh)
+                expected = resp.headers.get("Content-Length")
+                # http.client does not raise on a short body; check the length ourselves
+                if expected is not None and fh.tell() != int(expected):
+                    raise http.client.IncompleteRead(b"")
+        except (OSError, http.client.HTTPException) as exc:
+            part.unlink(missing_ok=True)
+            raise NavidromeError("Navidrome download was interrupted") from exc
+        part.replace(path)
     return path
 
 
@@ -106,8 +122,11 @@ def fetch(nd: dict, song_id: str, dest: Path):
     """Original audio file + full-size cover into ``dest``."""
     dest.mkdir(parents=True, exist_ok=True)
     song = _subsonic(nd, "getSong", id=song_id)["song"]
+    suffix = song.get("suffix") or ""
+    if not suffix.isalnum():  # server-supplied; keep it out of the filename
+        suffix = "bin"
     audio = _save(_subsonic_url(nd, "stream", id=song_id, format="raw"),
-                  lambda _: dest / f"audio.{song.get('suffix') or 'bin'}")
+                  lambda _: dest / f"audio.{suffix}")
     cover = None
     if song.get("coverArt"):
         cover = _save(_subsonic_url(nd, "getCoverArt", id=song["coverArt"]),
