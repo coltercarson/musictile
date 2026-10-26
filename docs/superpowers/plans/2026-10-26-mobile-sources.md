@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - HTTP calls use stdlib `urllib`; Python deps are only `flask`, `yt-dlp[default]`, `numpy`.
-- Navidrome login: `POST {url}/auth/login`; keep `token`, `subsonicSalt`, `subsonicToken`; never store the password.
+- Navidrome login: `POST {url}/auth/login`; keep `token`, `subsonicSalt`, `subsonicToken`; the server never stores the password. Like feishin, the browser remembers URL + username, and the password too when "Save password" is ticked (localStorage), and silently re-logs in once on a 401.
 - Subsonic params: `c=video-tile`, `v=1.16.1`, `f=json`. Subsonic/cover/audio URLs never reach the browser.
 - Waveform: 700 buckets, 8 kHz mono decode, JSON cache keyed by sha1 of `<source>:<ref>`.
 - Render: center-crop square, 30 fps, `libx264 -tune stillimage`, peak-normalize to 0 dBFS, AAC 192k, `+faststart`.
@@ -197,7 +197,7 @@ The UI is iterated with the user, so this task specifies behaviour and acceptanc
 - Produces: `app.js` talks only through an `api` object whose methods mirror the API contract table above. `mock.js` defines `window.mockApi` with the same methods, returning fixture data after a 300–800 ms delay. `app.js` uses `window.mockApi` when it exists, else the real fetch-based `api`.
 - `api` methods: `config()`, `ndLogin(url, username, password)`, `ndLogout()`, `ndPlaylists()`, `ndPlaylist(id)`, `ndSearch(q)`, `ytLookup(url)`, `addTrack(source, ref)` → `{key}`, `uploadTrack(file)` → `{key}`, `track(key)`, `peaks(key)`, `audioUrl(key)`, `coverUrl(key, which)`, `discogsSearch(q)`, `discogsImages(resourceUrl)`, `setCoverUrl(key, url)`, `uploadCover(key, file)`, `render(payload)` → `{job}`, `job(id)`.
 
-- [ ] **Step 1: Build `static/index.html`**: mobile viewport meta, `theme-color`, inline CSS tokens (dark default, light under `prefers-color-scheme: light`), bottom step bar (Source · Pick · Clips (n) · Export) fixed with `env(safe-area-inset-bottom)` padding, one `<main>` that `app.js` renders into, a `<dialog>` for the cover sheet. Tap targets ≥ 44 px. Loads `mock.js` then `app.js`.
+- [ ] **Step 1: Build `static/index.html`**: mobile viewport meta, `theme-color`, inline CSS tokens (dark default, light under `prefers-color-scheme: light`), bottom step bar (Source · Select · Clips (n) · Export) fixed with `env(safe-area-inset-bottom)` padding, one `<main>` that `app.js` renders into, a `<dialog>` for the cover sheet. Tap targets ≥ 44 px. Loads `mock.js` then `app.js`.
 
 - [ ] **Step 2: Build `static/mock.js`**: fixtures: 4 playlists (one with 25 songs), search returning 8 songs for any query, a YouTube lookup that returns a 6-video playlist when the URL contains `list=` and a single video otherwise, peaks as a smoothed random envelope of 700 floats, track status `fetching` for ~1.5 s then `ready` (with one track that fails), Discogs search with 9 results using `https://picsum.photos/seed/<n>/300` images, render job that advances one item per second. `audioUrl` returns a short silent WAV data URL; `coverUrl` returns a picsum image.
 
@@ -810,7 +810,8 @@ BROWSER_AUDIO = {".mp3", ".m4a", ".aac", ".ogg", ".opus", ".flac", ".wav", ".web
 
 app = Flask(__name__, static_folder="static", static_url_path="")
 app.secret_key = os.environ["SECRET_KEY"]
-app.config.update(SESSION_COOKIE_SAMESITE="Lax", MAX_CONTENT_LENGTH=500 * 1024 * 1024)
+app.config.update(SESSION_COOKIE_SAMESITE="Lax", MAX_CONTENT_LENGTH=500 * 1024 * 1024,
+                  PERMANENT_SESSION_LIFETIME=30 * 24 * 3600)
 
 fetch_pool = ThreadPoolExecutor(max_workers=3)
 render_pool = ThreadPoolExecutor(max_workers=1)  # ponytail: one render at a time; ffmpeg already uses all cores
@@ -907,6 +908,7 @@ def config():
 def nd_login():
     body = request.get_json(force=True)
     session["nd"] = navidrome.login(body.get("url") or ND_URL, body.get("username", ""), body.get("password", ""))
+    session.permanent = True  # survive browser restarts; the JWT inside still expires on Navidrome's schedule
     return {"user": session["nd"]["user"]}
 
 
@@ -1156,7 +1158,7 @@ git add app.py && git commit -m "API: sources, tracks, peaks, covers, render job
 **Interfaces:**
 - Consumes: API contract table.
 
-- [ ] **Step 1: Implement the real `api` object in `app.js`**: one `call(method, path, body)` helper: JSON body unless `body instanceof FormData`; on non-2xx parse `{error, login}` and throw an `Error` with `.login`. Global handler: an error with `.login` sends the user to Pick/Navidrome's login form (queue untouched); others show a toast. `audioUrl(key)` = `/api/tracks/${key}/audio`; `coverUrl(key, which)` = `/api/tracks/${key}/cover?which=${which}&t=${Date.now()}` (cache-bust after a change).
+- [ ] **Step 1: Implement the real `api` object in `app.js`**: one `call(method, path, body)` helper: JSON body unless `body instanceof FormData`; on non-2xx parse `{error, login}` and throw an `Error` with `.login`. The prototype already wraps calls with the saved-password silent re-login and the `.login` → login-form handling; keep that wrapper and make the real `api` go through it. `audioUrl(key)` = `/api/tracks/${key}/audio`; `coverUrl(key, which)` = `/api/tracks/${key}/cover?which=${which}&t=${Date.now()}` (cache-bust after a change).
 
 - [ ] **Step 2: Remove the mock**: delete `static/mock.js` and its `<script>` tag; drop the `window.mockApi` switch.
 

@@ -13,7 +13,7 @@ the phone.
 ## Scope
 
 In:
-- Mobile web UI with a four-step flow: Source → Pick → Clips → Export.
+- Mobile web UI with a four-step flow: Source → Select → Clips → Export.
 - Sources: Navidrome (login, playlists, song search), YouTube (video or playlist URL), Local file (upload).
 - Per-track start time chosen on a waveform (tap to seek, set start); one shared clip length.
 - Cover picker: default cover, Discogs search, image URL, image upload.
@@ -39,7 +39,7 @@ the start of the production frontend, not a throwaway.
 - **Navidrome login (from feishin, `src/renderer/api/navidrome/`):**
   `POST {server}/auth/login` with `{username, password}`. The response holds
   `token` (JWT for the native API), `subsonicSalt` and `subsonicToken`. Keep
-  those; never store the password. Native API calls send
+  those; the server never stores the password. Like feishin, the login form remembers the server URL and username, and the password when "Save password" is ticked (browser localStorage); on 401 the page silently re-logs in once with a saved password before showing the form. Native API calls send
   `x-nd-authorization: Bearer <jwt>`; when a response carries a new
   `x-nd-authorization` header, replace the stored JWT. On 401, clear the session
   and return to the login form (feishin's behaviour when no password is saved).
@@ -108,7 +108,7 @@ routes, one picker screen, one button on the Source step.
 
 ### Track lifecycle
 
-1. The user adds a track in Pick. The page POSTs `{source, ref, title, artist, album}`.
+1. The user adds a track in Select. The page POSTs `{source, ref, title, artist, album}`.
 2. The server assigns a track key, downloads audio and default cover into
    `cache/<key>/`, and reports ready or failed.
 3. Once audio is cached, the server computes its waveform peaks
@@ -128,21 +128,21 @@ song should reuse them.
 
 ### Session
 
-Flask signed session cookie (HttpOnly, `SameSite=Lax`) holds Navidrome
+Flask signed, permanent (30-day) session cookie (HttpOnly, `SameSite=Lax`) holds Navidrome
 `url`, `username`, `jwt`, `subsonicSalt`, `subsonicToken`. `SECRET_KEY` comes
 from env so restarts keep you logged in. Debug mode is off.
 
 ## UI flow
 
-A step bar at the bottom: **Source · Pick · Clips (n) · Export**. Any step
+A step bar at the bottom: **Source · Select · Clips (n) · Export**. Any step
 can be revisited; the queue persists across them.
 
 1. **Source**: large buttons: Navidrome, YouTube, Local file.
-2. **Pick**: depends on the source.
+2. **Select**: depends on the source.
    - Navidrome: login form if there's no session (server URL prefilled from
      `ND_URL` env, default `http://navidrome:4533`; username; password). Then a
      Playlists / Search toggle. Playlists → tap one → song list with
-     tap-to-add and "Add all". Search → song results with tap-to-add.
+     tap-to-add, "Select all" and "Deselect all". Search → song results with tap-to-add.
    - YouTube: URL field. A video URL adds that video. A playlist URL (or a
      watch URL with `list=`) shows the playlist's videos in the same list UI
      as a Navidrome playlist: tap-to-add and "Add all".
@@ -152,7 +152,7 @@ can be revisited; the queue persists across them.
    top. One card per track: cover thumbnail, title/artist, remove button, and a
    waveform with play/pause and time display. The clip window
    (start → start + length) is shaded on the waveform; tap the waveform to
-   seek; **Set start here** moves the window to the playhead; play from start
+   set the clip start there (drag adjusts it); play from start
    previews the clip. Placeholder "building waveform…" until peaks arrive. Tapping the cover
    opens the cover picker sheet:
    - Default cover (Navidrome art / embedded art / YouTube thumbnail).
