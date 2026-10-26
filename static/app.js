@@ -1,6 +1,5 @@
 'use strict';
-/* Video Tile UI. Talks to the server only through `api` (mock.js provides
-   window.mockApi for the prototype; without it the fetch-based api is used). */
+/* Video Tile UI. Talks to the server only through `api`, which wraps `realApi` (fetch against the Flask routes). */
 
 /* ---------------- api ---------------- */
 const realApi = (() => {
@@ -39,7 +38,7 @@ const realApi = (() => {
     job: (id) => req('GET', `/api/render/${enc(id)}`),
   };
 })();
-const rawApi = window.mockApi || realApi;
+const rawApi = realApi;
 
 // Navidrome login remembered like feishin: URL + username always, password only if "Save password" was ticked
 const LOGIN_KEY = 'vt-nd-login';
@@ -322,8 +321,6 @@ function selectNd() {
   const tab = (id, label) => h('button', { 'aria-pressed': String(ui.ndTab === id), onclick: () => { ui.ndTab = id; render(); } }, label);
   const head = h('div', { class: 'row' },
     h('h1', { class: 'grow' }, 'Navidrome'),
-    // prototype only: lets the auto re-login path be tried by hand
-    window.mockDebug ? h('button', { class: 'btn ghost', onclick: () => { mockDebug.expireSession(); toast('Mock: session expired'); } }, 'Expire session') : null,
     h('button', { class: 'btn ghost', onclick: logout }, 'Log out'));
   let body;
   if (ui.ndTab === 'search') body = searchView();
