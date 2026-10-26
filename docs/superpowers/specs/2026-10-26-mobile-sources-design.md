@@ -98,8 +98,9 @@ code has moved.
 
 Each source is a module exposing:
 
-- `fetch_audio(ref, dest_dir) -> Path`
-- `fetch_cover(ref, dest_dir) -> Path | None`
+- `fetch(ref, dest_dir) -> (audio: Path, cover: Path | None)`
+
+When a source has no cover, the server falls back to art embedded in the audio file.
 
 `ref` is source-specific (Navidrome song id, YouTube URL, uploaded file token).
 Picker endpoints are source-specific. Adding a source = one module, a few
