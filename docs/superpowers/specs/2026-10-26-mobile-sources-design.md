@@ -14,8 +14,8 @@ the phone.
 
 In:
 - Mobile web UI with a four-step flow: Source → Pick → Clips → Export.
-- Sources: Navidrome (login, playlists, song search), YouTube (URL), Local file (upload).
-- Per-track start time chosen by scrubbing an audio player; one shared clip length.
+- Sources: Navidrome (login, playlists, song search), YouTube (video or playlist URL), Local file (upload).
+- Per-track start time chosen on a waveform (tap to seek, set start); one shared clip length.
 - Cover picker: default cover, Discogs search, image URL, image upload.
 - Server-side rendering with ffmpeg; save via Android share sheet.
 - Runs in Docker, reached at `http://coltersrv:5050`.
@@ -55,6 +55,17 @@ the start of the production frontend, not a throwaway.
   result's `resource_url`, `DISCOGS_TOKEN` from env, ~1 req/s throttle, retry on
   429 honouring `Retry-After`.
 
+- **Waveforms (from tdz, `tdz/waveform.py` + `static/refine.js` `paintWave`):**
+  copy `waveform.py` near-verbatim: ffmpeg decodes to 8 kHz mono f32, numpy
+  buckets into 700 peak amplitudes normalized to 0..1, cached as JSON under a
+  hashed key. Swap tdz's `get_audition_config`/`app_log` for a `PEAKS_DIR`
+  constant and `print`. Draw on a 2× canvas the way `paintWave` does: one bar per
+  pixel, played part in the accent colour, a playhead line. Reuse
+  `tests/test_waveform.py`'s ffmpeg-tone approach for the test.
+- **YouTube playlists:** yt-dlp `extract_info(url, download=False)` with
+  `extract_flat: "in_playlist"` lists entries (id, title, duration) without
+  downloading them.
+
 ## Architecture
 
 ```
@@ -72,11 +83,12 @@ phone (Chrome) ──HTTP──> Flask app (Docker, :5050)
 |------|---------|
 | `app.py` | Flask routes, session, render job thread. Replaces `video_ui.py`. |
 | `navidrome.py` | Login, playlists, playlist tracks, search, `fetch_audio`, `fetch_cover`. |
-| `youtube.py` | yt-dlp download, moved from `sq_vid.py`; `fetch_audio`, `fetch_cover` (thumbnail). |
+| `youtube.py` | yt-dlp download, moved from `sq_vid.py`; `list_playlist(url)`; `fetch_audio`, `fetch_cover` (thumbnail). |
+| `waveform.py` | Peaks envelope + disk cache, copied from tdz. |
 | `discogs.py` | Release search and release images for the cover picker. |
 | `render.py` | `render(audio, image, start, length, res, out)`: one ffmpeg call. |
 | `static/index.html`, `static/app.js` | The whole UI. Plain JS, no build step. |
-| `test_render.py` | Render check (see Testing). |
+| `test_render.py` | Render + waveform check (see Testing). |
 | `Dockerfile`, `docker-compose.yml` | Deployment. |
 
 `sq_vid.py`, `video_ui.py` and the MoviePy dependency are removed once their
@@ -98,15 +110,20 @@ routes, one picker screen, one button on the Source step.
 1. The user adds a track in Pick. The page POSTs `{source, ref, title, artist, album}`.
 2. The server assigns a track key, downloads audio and default cover into
    `cache/<key>/`, and reports ready or failed.
-3. The Clips step plays `cache/<key>/audio` via `send_file` (Range/seek support
-   built in), so there's no stream proxying.
+3. Once audio is cached, the server computes its waveform peaks
+   (`waveform.cached_peaks`, key `<source>:<ref>`, e.g. `nd:<song id>` or
+   `yt:<video id>`). The Clips step fetches peaks as JSON and plays
+   `cache/<key>/audio` via `send_file` (Range/seek support built in), so there's
+   no stream proxying.
 4. Export POSTs the list of `{key, start, cover}` plus shared length/resolution.
    One background thread renders tracks in order into `output/`; the page polls
    per-track status.
 
 The queue (track keys, metadata, start, chosen cover) lives in the browser in
 `localStorage` so a refresh keeps it. Files in `cache/` and `output/` older than
-24h are deleted when a new track is added or a render starts.
+24h are deleted when a new track is added or a render starts. Peaks live in a
+separate `peaks/` dir that is not swept: they're a few KB each and re-adding a
+song should reuse them.
 
 ### Session
 
@@ -125,12 +142,17 @@ can be revisited; the queue persists across them.
      `ND_URL` env, default `http://navidrome:4533`; username; password). Then a
      Playlists / Search toggle. Playlists → tap one → song list with
      tap-to-add and "Add all". Search → song results with tap-to-add.
-   - YouTube: URL field + Add.
+   - YouTube: URL field. A video URL adds that video. A playlist URL (or a
+     watch URL with `list=`) shows the playlist's videos in the same list UI
+     as a Navidrome playlist: tap-to-add and "Add all".
    - Local file: audio file input + Add.
    Added tracks show a tick; the step bar count updates.
 3. **Clips**: shared length (default 30s) and resolution (default 1080) at the
-   top. One card per track: cover thumbnail, title/artist, `<audio controls>`,
-   **Set start here** (shows the chosen time), remove button. Tapping the cover
+   top. One card per track: cover thumbnail, title/artist, remove button, and a
+   waveform with play/pause and time display. The clip window
+   (start → start + length) is shaded on the waveform; tap the waveform to
+   seek; **Set start here** moves the window to the playhead; play from start
+   previews the clip. Placeholder "building waveform…" until peaks arrive. Tapping the cover
    opens the cover picker sheet:
    - Default cover (Navidrome art / embedded art / YouTube thumbnail).
    - Discogs: query prefilled "artist album" (editable), grid of
@@ -169,17 +191,19 @@ Center-crop replaces the old resize-height-then-width, which stretched non-squar
 
 - `test_render.py`: generate a sine tone and a non-square image with ffmpeg
   `lavfi`, render a 5s clip from 2s, assert with `ffprobe`: video is res×res,
-  there's an audio stream, duration ≈ 5s. Runnable with plain `python test_render.py`.
+  there's an audio stream, duration ≈ 5s. Also: `compute_peaks` on the tone
+  returns 700 values in 0..1, and a second `cached_peaks` call reads the
+  cache. Runnable with plain `python test_render.py`.
 - Manual: full flow on the Pixel 9a against the live Navidrome, including
   Discogs cover swap and Save all to Photos.
 
 ## Deployment
 
 - `Dockerfile`: `python:3.12-slim`, `apt-get install ffmpeg`, `pip install -r
-  requirements.txt` (flask, yt-dlp; HTTP calls use stdlib `urllib`), run `python app.py`
+  requirements.txt` (flask, yt-dlp, numpy; HTTP calls use stdlib `urllib`), run `python app.py`
   on `0.0.0.0:5000`.
 - `docker-compose.yml`: port `5050:5000`; joins the external
   `navidrome_default` network (Navidrome only listens on localhost and the
-  Tailscale IP); volume for `cache/` and `output/`; env `SECRET_KEY`,
+  Tailscale IP); volume for `cache/`, `output/` and `peaks/`; env `SECRET_KEY`,
   `DISCOGS_TOKEN`, `ND_URL`; `restart: unless-stopped`.
 - Reached at `http://coltersrv:5050`.
