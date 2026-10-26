@@ -28,7 +28,7 @@ Out (later):
 ## Process note: prototype the UI first
 
 Before any backend work, build a clickable prototype of the full flow: the real
-`static/index.html` + `app.js` with mock data (fake playlists, songs, Discogs
+`static/index.html` + `app.js` with mock data (fake playlists, songs, YouTube playlist, waveform peaks, Discogs
 results, render progress) and no server calls. Serve it from the server and
 review it on the Pixel 9a (~412×915 CSS px viewport, Chrome). Iterate on layout
 and flow until approved, then replace the mocks with API calls. The prototype is
