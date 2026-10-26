@@ -109,7 +109,7 @@
     config: () => reply(cfg),
 
     ndLogin(url, username, password) {
-      if (!username || password === 'wrong') return fail('Wrong username or password', { status: 401, login: true });
+      if (!username || !password) return fail('Wrong username or password', { status: 401, login: true });
       cfg.nd_url = url; cfg.nd_user = username; lsSet(username);
       return reply({ user: username });
     },
@@ -201,7 +201,8 @@
   };
 
   // Error-path triggers for testing from the devtools console, e.g.
-  //   mockDebug.expireSession()        next Navidrome call (e.g. Add all) gets 401 {login:true}
+  //   mockDebug.expireSession()        next Navidrome call gets 401 {login:true} (also the Expire session button)
+  //   mockDebug.fail('ndLogin', 1, 401) the next login, e.g. the silent re-login, fails
   //   mockDebug.forgetJobs()           job() returns 404 for the running render
   //   mockDebug.fail('job', 10)        next 10 job() calls fail like a network error (fail(m, n, 503) for a 5xx)
   //   mockDebug.fail('track', 5)       next 5 track() polls fail

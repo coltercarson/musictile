@@ -39,13 +39,42 @@ const realApi = (() => {
     job: (id) => req('GET', `/api/render/${enc(id)}`),
   };
 })();
-const api = window.mockApi || realApi;
+const rawApi = window.mockApi || realApi;
+
+// Navidrome login remembered like feishin: URL + username always, password only if "Save password" was ticked
+const LOGIN_KEY = 'vt-nd-login';
+function savedLogin() { try { return JSON.parse(localStorage.getItem(LOGIN_KEY)) || {}; } catch { return {}; } }
+function saveLogin(v) { try { localStorage.setItem(LOGIN_KEY, JSON.stringify(v)); } catch {} }
+
+// Every api call goes through here. On a Navidrome 401 (.login) with a saved password: sign in again
+// silently, once, and retry the call once. Calls that fail together share one re-login.
+let loginGen = 0, relogging = null;
+async function relogin(orig) {
+  const s = savedLogin();
+  if (!s.pass) throw orig;
+  try {
+    const r = await rawApi.ndLogin(s.url, s.user, s.pass);
+    if (ui.config) Object.assign(ui.config, { nd_user: r.user, nd_url: s.url });
+  } catch (e) {
+    throw Object.assign(new Error(`Couldn’t sign in again: ${e.message}`), { status: e.status, login: true });
+  } finally { loginGen++; }
+}
+const api = Object.fromEntries(Object.entries(rawApi).map(([name, fn]) => [name,
+  ['audioUrl', 'coverUrl', 'ndLogin', 'ndLogout', 'config'].includes(name) ? fn : async (...args) => {
+    const gen = loginGen;
+    try { return await fn(...args); } catch (e) {
+      if (!e.login) throw e;
+      if (gen === loginGen) await (relogging ||= relogin(e).finally(() => { relogging = null; }));
+      return fn(...args);
+    }
+  }]));
 
 /* ---------------- state ---------------- */
 const LS_KEY = 'video-tile';
-const STEPS = ['source', 'pick', 'clips', 'export'];
+const STEPS = ['source', 'select', 'clips', 'export'];
 const state = { step: 'source', source: null, queue: [], length: 30, res: 1080 };
 try { Object.assign(state, JSON.parse(localStorage.getItem(LS_KEY)) || {}); } catch {}
+if (state.step === 'pick') state.step = 'select'; // renamed step
 if (!STEPS.includes(state.step)) state.step = 'source';
 state.queue = (state.queue || []).filter((t) => t && t.key); // drop half-finished adds
 function persist() { try { localStorage.setItem(LS_KEY, JSON.stringify(state)); } catch {} }
@@ -87,7 +116,6 @@ const ICONS = {
   upload: '<path d="M12 16V4M7 9l5-5 5 5M5 20h14"/>',
   save: '<path d="M12 4v11M7 10l5 5 5-5M5 20h14"/>',
   search: '<circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/>',
-  flag: '<path d="M6 21V4M6 4h11l-2 4 2 4H6"/>',
   image: '<rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="9" cy="9" r="2"/><path d="M21 15l-5-5L5 21"/>',
 };
 function icon(name) {
@@ -121,7 +149,7 @@ addEventListener('popstate', (e) => {
 $$('nav.steps button').forEach((b) => b.addEventListener('click', () => { if (b.dataset.step !== state.step) go(b.dataset.step); }));
 
 function render() {
-  const screen = { source: sourceScreen, pick: pickScreen, clips: clipsScreen, export: exportScreen }[state.step];
+  const screen = { source: sourceScreen, select: selectScreen, clips: clipsScreen, export: exportScreen }[state.step];
   $('#app').replaceChildren(...[screen()].flat(Infinity).filter(Boolean));
   renderBar();
   if (state.step === 'clips') paintAll();
@@ -142,23 +170,24 @@ function changed(item) {
   persist(); renderBar(); syncTicks();
   if (state.step === 'clips') { if (item) updateCard(item); else render(); }
   if (state.step === 'export') render();
-  if (state.step === 'pick' && state.source === 'local') render();
+  if (state.step === 'select' && state.source === 'local') render();
 }
 function newItem(source, t) {
   return { key: null, source, ref: t.ref, title: t.title, artist: t.artist || '', album: t.album || '', status: 'adding', duration: t.duration || 0, start: 0, cover: 'default' };
 }
-// Navidrome said the session is gone: show the login form once, however many calls hit it
-function loginLost() {
+// Navidrome session is gone and the silent re-login (if any) failed: show the login form once,
+// however many calls hit it
+function loginLost(e) {
   if (!ui.config || ui.config.nd_user == null) return;
-  ui.config.nd_user = null; ui.slots.clear(); ui.searchRes = null;
+  ui.config.nd_user = null; ui.slots.clear(); ui.searchRes = null; ui.loginError = e && e.message;
   toast('Navidrome session expired. Sign in again.');
-  if (state.step === 'pick') render();
+  if (state.step === 'select') render();
 }
 // run one add/upload call for an optimistic queue item; returns false on a login error
 async function settle(item, call) {
   try { item.key = (await call()).key; item.status = 'fetching'; }
   catch (e) {
-    if (e.login) { removeItem(item); loginLost(); return false; }
+    if (e.login) { removeItem(item); loginLost(e); return false; }
     item.status = 'failed'; item.error = e.message;
   }
   if (state.queue.includes(item)) changed(item);
@@ -211,7 +240,7 @@ setInterval(() => state.queue.forEach((t) => t.status === 'fetching' && checkTra
 
 /* ---------------- source ---------------- */
 function sourceScreen(title) {
-  const src = (id, ic, name, sub) => h('button', { class: 'src' + (state.source === id ? ' on' : ''), onclick: () => { state.source = id; go('pick'); } },
+  const src = (id, ic, name, sub) => h('button', { class: 'src' + (state.source === id ? ' on' : ''), onclick: () => { state.source = id; go('select'); } },
     icon(ic), h('div', { class: 'grow' }, h('b', {}, name), h('span', { class: 'muted small' }, sub)), icon('next'));
   return [
     h('h1', {}, title || 'Where’s the music?'),
@@ -222,20 +251,20 @@ function sourceScreen(title) {
   ];
 }
 
-/* ---------------- pick ---------------- */
-function pickScreen() {
+/* ---------------- select ---------------- */
+function selectScreen() {
   if (!state.source) return sourceScreen('Choose a source first');
-  return { nd: pickNd, yt: pickYt, local: pickLocal }[state.source]();
+  return { nd: selectNd, yt: selectYt, local: selectLocal }[state.source]();
 }
 
-// async slot: loads once, re-renders Pick when done
+// async slot: loads once, re-renders Select when done
 function slot(name, fn) {
   if (!ui.slots.has(name)) {
     ui.slots.set(name, { loading: true });
     fn().then((data) => ui.slots.set(name, { data }), (e) => {
-      if (e.login && ui.config) ui.config.nd_user = null;
       ui.slots.set(name, { error: e.message });
-    }).then(() => state.step === 'pick' && render());
+      if (e.login) loginLost(e);
+    }).then(() => state.step === 'select' && render());
   }
   return ui.slots.get(name);
 }
@@ -253,21 +282,22 @@ function trackRow(t, source, meta) {
       h('span', { class: 'ellip' }, meta ?? [t.artist, t.album, t.duration ? fmt(t.duration) : ''].filter(Boolean).join(' · '))),
     h('span', { class: 'add' + (on ? ' on' : '') }, icon(on ? 'check' : 'plus')));
 }
-function addAllBtn(tracks, source) {
-  const b = h('button', { class: 'btn primary', onclick: () => tracks.forEach((t) => enqueue(source, t)) });
-  b._sync = () => {
-    const left = tracks.filter((t) => !findQ(source, t.ref)).length;
-    b.disabled = !left; b.replaceChildren(left ? icon('plus') : icon('check'), left ? (left === tracks.length ? `Add all ${left}` : `Add ${left} more`) : 'All added');
-  };
-  b._sync();
-  return b;
+// Select all / Deselect all for one list; each disables itself when it would do nothing
+function selectBtns(tracks, source) {
+  const queued = () => tracks.map((t) => findQ(source, t.ref)).filter(Boolean);
+  const sel = h('button', { class: 'btn primary', onclick: () => tracks.forEach((t) => enqueue(source, t)) }, 'Select all');
+  const desel = h('button', { class: 'btn', onclick: () => queued().forEach(removeItem) }, 'Deselect all');
+  sel._sync = () => { sel.disabled = queued().length === tracks.length; };
+  desel._sync = () => { desel.disabled = !queued().length; };
+  sel._sync(); desel._sync();
+  return h('div', { class: 'sel' }, sel, desel);
 }
 function trackList(tracks, source, { title, back, addAll = true } = {}) {
   return h('div', {},
     (title || back || addAll) ? h('div', { class: 'list-head' },
       back ? h('button', { class: 'icon-btn', 'aria-label': 'Back', onclick: back }, icon('back')) : null,
       h('h2', { class: 'ellip' }, title || ''),
-      addAll && tracks.length > 1 ? addAllBtn(tracks, source) : null) : null,
+      addAll && tracks.length > 1 ? selectBtns(tracks, source) : null) : null,
     tracks.length ? h('div', { class: 'list' }, tracks.map((t) => trackRow(t, source))) : h('div', { class: 'empty' }, 'Nothing here.'));
 }
 function syncTicks() {
@@ -280,12 +310,14 @@ function syncTicks() {
   $$('.btn').forEach((b) => b._sync && b._sync());
 }
 
-function pickNd() {
+function selectNd() {
   if (!ui.config) { loadConfig(); return [h('h1', {}, 'Navidrome'), spinner()]; }
   if (!ui.config.nd_user) return loginForm();
   const tab = (id, label) => h('button', { 'aria-pressed': String(ui.ndTab === id), onclick: () => { ui.ndTab = id; render(); } }, label);
   const head = h('div', { class: 'row' },
     h('h1', { class: 'grow' }, 'Navidrome'),
+    // prototype only: lets the auto re-login path be tried by hand
+    window.mockDebug ? h('button', { class: 'btn ghost', onclick: () => { mockDebug.expireSession(); toast('Mock: session expired'); } }, 'Expire session') : null,
     h('button', { class: 'btn ghost', onclick: logout }, 'Log out'));
   let body;
   if (ui.ndTab === 'search') body = searchView();
@@ -295,7 +327,7 @@ function pickNd() {
       trackList(tracks, 'nd', { title: pl.name, back: () => (history.state && history.state.pl ? history.back() : ((ui.openPl = null), render())) }));
   } else {
     body = slotView(slot('playlists', api.ndPlaylists), (pls) => pls.length
-      ? h('div', { class: 'list' }, pls.map((p) => h('button', { class: 'item', onclick: () => { ui.openPl = { id: p.id, name: p.name }; go('pick', { pl: ui.openPl }); } },
+      ? h('div', { class: 'list' }, pls.map((p) => h('button', { class: 'item', onclick: () => { ui.openPl = { id: p.id, name: p.name }; go('select', { pl: ui.openPl }); } },
         h('div', { class: 't' }, h('b', { class: 'ellip' }, p.name), h('span', {}, plural(p.count, 'song'))), icon('next'))))
       : h('div', { class: 'empty' }, 'No playlists.'));
   }
@@ -303,7 +335,8 @@ function pickNd() {
     h('div', { class: 'seg', role: 'group' }, tab('playlists', 'Playlists'), tab('search', 'Search')), body];
 }
 function loginForm() {
-  const err = h('p', { class: 'err', hidden: true });
+  const saved = savedLogin();
+  const err = h('p', { class: 'err', hidden: !ui.loginError }, ui.loginError || '');
   const btn = h('button', { class: 'btn primary block big', type: 'submit' }, 'Sign in');
   const f = h('form', {
     onsubmit: async (e) => {
@@ -312,17 +345,20 @@ function loginForm() {
       btn.disabled = true; btn.textContent = 'Signing in…'; err.hidden = true;
       try {
         const r = await api.ndLogin(d.get('url'), d.get('username'), d.get('password'));
-        Object.assign(ui.config, { nd_user: r.user, nd_url: d.get('url') }); ui.slots.clear(); render();
+        saveLogin({ url: d.get('url'), user: d.get('username'), pass: d.get('save') ? d.get('password') : undefined });
+        Object.assign(ui.config, { nd_user: r.user, nd_url: d.get('url') }); ui.loginError = null; ui.slots.clear(); render();
       } catch (e2) { err.textContent = e2.message; err.hidden = false; btn.disabled = false; btn.textContent = 'Sign in'; }
     },
   },
-  h('label', { class: 'field' }, h('span', {}, 'Server URL'), h('input', { type: 'url', name: 'url', value: ui.config.nd_url || '', required: true, autocomplete: 'url', inputmode: 'url' })),
-  h('label', { class: 'field' }, h('span', {}, 'Username'), h('input', { type: 'text', name: 'username', required: true, autocomplete: 'username', autocapitalize: 'none', spellcheck: false })),
+  h('label', { class: 'field' }, h('span', {}, 'Server URL'), h('input', { type: 'url', name: 'url', value: saved.url || ui.config.nd_url || '', required: true, autocomplete: 'url', inputmode: 'url' })),
+  h('label', { class: 'field' }, h('span', {}, 'Username'), h('input', { type: 'text', name: 'username', value: saved.user || '', required: true, autocomplete: 'username', autocapitalize: 'none', spellcheck: false })),
   h('label', { class: 'field' }, h('span', {}, 'Password'), h('input', { type: 'password', name: 'password', autocomplete: 'current-password' })),
+  h('label', { class: 'check' }, h('input', { type: 'checkbox', name: 'save', checked: !!saved.pass }), 'Save password'),
   err, btn);
   return [h('h1', {}, 'Sign in to Navidrome'), f];
 }
 function logout() {
+  const { url, user } = savedLogin(); saveLogin({ url, user }); // forget the password, keep the rest
   api.ndLogout().catch(() => {}).then(() => { ui.config.nd_user = null; ui.slots.clear(); ui.openPl = null; ui.searchRes = null; render(); });
 }
 let searchTimer, searchSeq = 0;
@@ -333,13 +369,13 @@ function searchView() {
     if (!r || !ui.searchQ.trim()) results.replaceChildren(h('div', { class: 'empty' }, 'Type to search songs.'));
     else if (r.loading) results.replaceChildren(spinner('Searching…'));
     else if (r.error) results.replaceChildren(h('p', { class: 'err' }, r.error));
-    else results.replaceChildren(trackList(r.data, 'nd', { addAll: false }));
+    else results.replaceChildren(trackList(r.data, 'nd', { title: plural(r.data.length, 'result') }));
   };
   const run = (q) => {
     const seq = ++searchSeq;
     ui.searchRes = { loading: true }; show();
     api.ndSearch(q).then((data) => ({ data }), (e) => {
-      if (e.login) { ui.config.nd_user = null; render(); }
+      if (e.login) loginLost(e);
       return { error: e.message };
     }).then((r) => { if (seq === searchSeq) { ui.searchRes = r; if (results.isConnected) show(); } });
   };
@@ -356,7 +392,7 @@ function searchView() {
   return h('div', {}, h('div', { style: 'margin-bottom:12px' }, input), results);
 }
 
-function pickYt() {
+function selectYt() {
   const input = h('input', { type: 'url', name: 'url', placeholder: 'https://youtube.com/watch?v=…', value: ui.ytUrl, required: true, inputmode: 'url', enterkeyhint: 'go', 'aria-label': 'YouTube URL', oninput: () => { ui.ytUrl = input.value; } });
   const lookup = async (e) => {
     e.preventDefault();
@@ -371,7 +407,7 @@ function pickYt() {
         enqueue('yt', r.tracks[0]); toast(had ? 'Already in clips' : 'Added to clips');
       }
     } catch (err) { ui.yt = { error: err.message }; }
-    if (state.step === 'pick' && state.source === 'yt') render();
+    if (state.step === 'select' && state.source === 'yt') render();
   };
   const y = ui.yt;
   let result = null;
@@ -387,7 +423,7 @@ function pickYt() {
   ];
 }
 
-function pickLocal() {
+function selectLocal() {
   const mine = state.queue.filter((t) => t.source === 'local');
   const st = (t) => ({ adding: 'Uploading…', fetching: 'Processing…', failed: t.error || 'Failed' }[t.status] || fmt(t.duration));
   return [
@@ -459,10 +495,10 @@ function clipsScreen() {
       h('label', { class: 'field' }, h('span', {}, 'Resolution'), resIn)),
   ];
   if (!state.queue.length) {
-    out.push(h('div', { class: 'empty' }, h('p', {}, 'No tracks yet.'), h('button', { class: 'btn primary', onclick: () => go(state.source ? 'pick' : 'source') }, 'Pick tracks')));
+    out.push(h('div', { class: 'empty' }, h('p', {}, 'No tracks yet.'), h('button', { class: 'btn primary', onclick: () => go(state.source ? 'select' : 'source') }, 'Select tracks')));
     return out;
   }
-  out.push(h('p', { class: 'muted small' }, 'Tap or drag the waveform to move the playhead, then Set start here.'));
+  out.push(h('p', { class: 'muted small' }, 'Tap or drag the waveform to set where the clip starts.'));
   out.push(h('div', { id: 'cards' }, state.queue.map(cardEl)));
   return out;
 }
@@ -494,7 +530,6 @@ function cardEl(item) {
     wave,
     h('div', { class: 'controls' },
       h('button', { class: 'play', 'aria-label': 'Play', disabled: !ready, onclick: () => play(item) }, icon('play')),
-      h('button', { class: 'btn setstart', disabled: !ready, onclick: () => setStart(item) }, icon('flag'), 'Set start here'),
       h('span', { class: 'grow' }),
       h('button', { class: 'chip', disabled: !ready, onclick: () => play(item, item.start) }, icon('play'), h('span', {}, `Start ${fmt(item.start)}`))));
   card._item = item;
@@ -507,12 +542,12 @@ function updateCard(item) {
   if (!old) { if (state.queue.includes(item) && $('#cards')) $('#cards').append(cardEl(item)); else if (!$('#cards')) render(); paintKey(item.key); return; }
   old.replaceWith(cardEl(item)); paintItem(item); syncPlayButtons();
 }
-function setStart(item) {
-  const d = durOf(item);
-  let t = ui.pos[item.key] ?? item.start;
-  if (d) t = Math.min(t, Math.max(0, d - 1));
-  item.start = Math.round(t * 10) / 10; persist(); paintItem(item);
-  toast(`Clip starts at ${fmt(item.start)}`, 1400);
+// clip start and playhead both move to t; a running preview follows the new window
+function setStart(item, t) {
+  const d = durOf(item); if (!d) return;
+  item.start = Math.round(Math.max(0, Math.min(t, d - 1)) * 10) / 10; persist();
+  if (cur === item.key && previewEnd != null) previewEnd = item.start + state.length;
+  seek(item, item.start);
 }
 const durOf = (item) => item.duration || (item.key === cur && isFinite(audio.duration) ? audio.duration : 0);
 
@@ -523,7 +558,8 @@ function seek(item, t) {
   if (cur === item.key && audio.readyState >= 1) { audio.currentTime = t; if (previewEnd != null && t < item.start) previewEnd = null; }
   paintItem(item);
 }
-// tap or horizontal drag seeks; vertical swipes still scroll the page (touch-action: pan-y)
+// tap or horizontal drag sets the clip start; vertical swipes still scroll the page (touch-action: pan-y),
+// so nothing moves on pointerdown alone
 function waveInput(wave, item) {
   let down = null;
   const at = (e) => { const r = wave.getBoundingClientRect(); return ((e.clientX - r.left) / r.width) * durOf(item); };
@@ -531,9 +567,9 @@ function waveInput(wave, item) {
   wave.addEventListener('pointermove', (e) => {
     if (!down) return;
     if (!down.drag && Math.abs(e.clientX - down.x) > 6) down.drag = true;
-    if (down.drag) seek(item, at(e));
+    if (down.drag) setStart(item, at(e));
   });
-  wave.addEventListener('pointerup', (e) => { if (down) seek(item, at(e)); down = null; });
+  wave.addEventListener('pointerup', (e) => { if (down) setStart(item, at(e)); down = null; });
   wave.addEventListener('pointercancel', () => { down = null; });
 }
 
@@ -779,9 +815,13 @@ async function saveFiles(items) {
 /* ---------------- start ---------------- */
 function loadConfig() {
   if (loadConfig.p) return loadConfig.p;
-  loadConfig.p = api.config().then((c) => { ui.config = c; }, (e) => {
+  loadConfig.p = api.config().then(async (c) => {
+    ui.config = c;
+    const s = savedLogin(); // not signed in but the password was saved: sign in silently
+    if (!c.nd_user && s.pass) await api.ndLogin(s.url, s.user, s.pass).then((r) => Object.assign(c, { nd_user: r.user, nd_url: s.url }), (e) => { ui.loginError = e.message; });
+  }, (e) => {
     ui.config = { nd_url: '', nd_user: null, discogs: false }; toast('Server unreachable: ' + e.message);
-  }).then(() => { if (state.step === 'pick') render(); });
+  }).then(() => { if (state.step === 'select') render(); });
   return loadConfig.p;
 }
 history.replaceState({ step: state.step }, '');
