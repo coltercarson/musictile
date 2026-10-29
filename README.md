@@ -24,7 +24,7 @@ Open `http://coltersrv:5050` (or `http://<host>:5050`).
 
 The compose file joins the external Docker network `navidrome_default` so the app can reach Navidrome by container name. If you don't run Navidrome in Docker on the same host, remove the `navidrome` network from `docker-compose.yml` and log in with Navidrome's normal URL.
 
-The code is bind-mounted into the container: after editing Python, run `docker compose restart video-tile`. Edits to `static/` only need a page reload.
+The code is bind-mounted into the container: after editing Python, run `docker compose restart musictile`. Edits to `static/` only need a page reload.
 
 yt-dlp is baked into the image, so when YouTube stops working, update it with `docker compose build --no-cache && docker compose up -d`.
 
@@ -39,7 +39,7 @@ The app has no login of its own. Anyone who can reach port 5050 can use it, so k
 ## Tests
 
 ```bash
-docker compose exec video-tile python test_render.py   # render + waveform
+docker compose exec musictile python test_render.py   # render + waveform
 python3 e2e.py                                         # whole flow in a headless Pixel-sized Chrome (Playwright)
 ```
 

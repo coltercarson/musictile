@@ -9,7 +9,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-CLIENT, VERSION = "video-tile", "1.16.1"
+CLIENT, VERSION = "musictile", "1.16.1"
 IMAGE_EXT = {"image/png": ".png", "image/webp": ".webp"}
 
 

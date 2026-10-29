@@ -10,7 +10,7 @@ import urllib.parse
 import urllib.request
 
 API = "https://api.discogs.com"
-USER_AGENT = "video-tile/0.1 +https://github.com/coltercarson/video-tile"
+USER_AGENT = "musictile/0.1 +https://github.com/coltercarson/musictile"
 INTERVAL, RATE_LIMIT_WAIT = 1.05, 65
 RELEASE_URL = re.compile(r"https://api\.discogs\.com/(releases|masters)/\d+")
 _lock = threading.Lock()
